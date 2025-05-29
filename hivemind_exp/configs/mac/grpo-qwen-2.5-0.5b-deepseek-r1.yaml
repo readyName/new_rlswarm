@@ -1,6 +1,7 @@
 # Model arguments
 model_revision: main
-torch_dtype: float16
+torch_dtype: float32
+attn_implementation: default
 bf16: false
 tf32: false
 
