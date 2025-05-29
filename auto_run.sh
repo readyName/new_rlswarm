@@ -1,5 +1,8 @@
 #!/bin/bash
 
+export WANDB_MODE=disabled
+export WANDB_MODE=offline
+
 MAX_RETRIES=1000000
 WARNING_THRESHOLD=10
 RETRY_COUNT=0
