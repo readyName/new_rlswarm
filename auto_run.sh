@@ -1,7 +1,5 @@
 #!/bin/bash
 
-export WANDB_MODE=disabled
-
 MAX_RETRIES=1000000
 WARNING_THRESHOLD=10
 RETRY_COUNT=0
@@ -18,7 +16,6 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
   # ✅ Set MPS environment (for Mac M1/M2 if applicable)
   export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
   export PYTORCH_ENABLE_MPS_FALLBACK=1
-  export WANDB_MODE=offline
   source ~/.zshrc
 
   # ✅ Kill lingering p2pd process if exists
@@ -30,7 +27,7 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
 
   # ✅ Start main script in background with automated input
   log "✅ Providing automated input:Y, A, 0.5, N"
-  echo -e "Y\nA\n0.5\nN" | ./run_rl_swarm.sh &
+  echo -e "Y\nA\n0.5\nN\n3" | ./run_rl_swarm.sh &
   RL_PID=$!
 
   # ✅ Wait for Python child process to initialize
