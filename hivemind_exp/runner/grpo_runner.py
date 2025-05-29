@@ -1,24 +1,23 @@
 # ruff: noqa: E402
 import logging
+import gc
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Tuple
+import time
 
 import torch
-import os
 
-UNSLOTH_ENABLED = (os.getenv('RL_SWARM_UNSLOTH', 'True') == 'True')
-if UNSLOTH_ENABLED:
-    try:
-        # Needs to be before trl!
-        if torch.cuda.is_available():
-            from unsloth import FastLanguageModel, PatchFastRL
+UNSLOTH_ENABLED = False
+try:
+    # Needs to be before trl!
+    if torch.cuda.is_available():
+        from unsloth import FastLanguageModel, PatchFastRL
 
-            PatchFastRL("GRPO", FastLanguageModel)
-        else:
-            UNSLOTH_ENABLED = False
-    except ImportError:
-        UNSLOTH_ENABLED = False
+        PatchFastRL("GRPO", FastLanguageModel)
+        UNSLOTH_ENABLED = True
+except ImportError:
+    pass
 
 import hivemind
 from datasets import Dataset
@@ -62,21 +61,20 @@ class GRPOArguments:
 
 
 class GRPORunner:
-    def get_model(self, grpo_args: GRPOArguments, training_args: GRPOConfig, model_name: str):
-        model_init_kwargs = training_args.model_init_kwargs or {}
+    def get_model(self, args: GRPOConfig, model_name: str):
+        model_init_kwargs = args.model_init_kwargs or {}
         # Disable caching if gradient checkpointing is enabled (not supported)
         model_init_kwargs["use_cache"] = (
-            False if training_args.gradient_checkpointing else model_init_kwargs.get("use_cache")
+            False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
         )
 
         quantization = parse_quantization(model_name)
-        if training_args.vllm_gpu_memory_utilization != 0.9: # Not default
-            self.peak_memory_percentage = training_args.vllm_gpu_memory_utilization
+        if args.vllm_gpu_memory_utilization != 0.9: # Not default
+            self.peak_memory_percentage = args.vllm_gpu_memory_utilization
         else:
             self.peak_memory_percentage=estimate_peak_mem_percentage(
-                model_name, training_args, quantization
+                model_name, args, quantization
             )
-        training_args.vllm_gpu_memory_utilization = self.peak_memory_percentage
         if UNSLOTH_ENABLED:
             model = FastLanguageModel.from_pretrained(
                 model_name,
@@ -143,16 +141,31 @@ class GRPORunner:
         return animal_name
 
     def setup_dht(self, grpo_args):
-        initial_peers = grpo_args.initial_peers
-        dht = hivemind.DHT(start=True, startup_timeout=30, **self._dht_kwargs(grpo_args))
-        if initial_peers:
-            logger.info(f"🐝 Joining swarm with initial_peers = {initial_peers}")
-        else:
-            first_visible = str(dht.get_visible_maddrs()[0])
-            logger.info(f"🤖 Starting swarm at {first_visible}")
+        max_retries = 100  # 最大重试次数
+        retry_interval = 5  # 重试间隔(秒)
+        startup_timeout = 300  # DHT启动超时时间(秒)
+        
+        for attempt in range(max_retries):
+            try:
+                initial_peers = grpo_args.initial_peers
+                dht = hivemind.DHT(start=True, startup_timeout=startup_timeout, **self._dht_kwargs(grpo_args))
+                if initial_peers:
+                    logger.info(f"🐝 Joining swarm with initial_peers = {initial_peers}")
+                else:
+                    first_visible = str(dht.get_visible_maddrs()[0])
+                    logger.info(f"🤖 Starting swarm at {first_visible}")
 
-        self.name = self._get_animal_name(str(dht.peer_id))
-        return dht
+                self.name = self._get_animal_name(str(dht.peer_id))
+                return dht
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"DHT setup failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    logger.info(f"Retrying in {retry_interval} seconds...")
+                    time.sleep(retry_interval)
+                    continue
+                else:
+                    logger.error(f"Failed to setup DHT after {max_retries} attempts")
+                    raise
 
     def run(
         self,
@@ -205,7 +218,7 @@ class GRPORunner:
         #########################
         model_name_or_path = model_args.model_name_or_path
         assert model_name_or_path
-        model = self.get_model(grpo_args, training_args, model_name_or_path)
+        model = self.get_model(training_args, model_name_or_path)
 
         initial_peers = grpo_args.initial_peers
         if initial_peers:
@@ -233,4 +246,18 @@ class GRPORunner:
         logger.info(
             f"Starting training {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} for {training_args.num_train_epochs} epochs"
         )
-        trainer.train()
+        try:
+            trainer.train()
+        finally:
+            logger.info("Cleaning up memory after training...")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            try:
+                if torch.xpu.is_available():
+                    torch.xpu.empty_cache()
+            except AttributeError:
+                pass
